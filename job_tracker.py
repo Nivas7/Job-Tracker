@@ -33,13 +33,15 @@ TITLE_INCLUDE = re.compile(
     re.I,
 )
 TITLE_EXCLUDE = re.compile(
-    r"senior|\bsr\b|staff|principal|\blead\b|manager|director|architect|"
+    r"senior|\bsr\b|staff|principal|\blead(er|ership)?\b|manager|director|architect|"
     r"head of|distinguished|\bintern\b|internship|\bsdet\b|\bqa\b|quality|"
     r"\b(engineer|developer|sde)\s*(iii|iv|v|3|4|5)\b",
     re.I,
 )
 # Max "years of experience" a posting may ask for (0-1, 1-2 => 2).
 MAX_YEARS_REQUIRED = 2
+# Ignore postings older than this many days (set to 0 to disable).
+MAX_AGE_DAYS = 60
 # Location must match one of these (India only).
 LOCATION_OK = re.compile(
     r"india|bengaluru|bangalore|chennai|hyderabad|pune|mumbai|gurgaon|gurugram|"
@@ -73,7 +75,8 @@ FULL_DESC_MIN_CHARS = 400
 
 # More companies with public job-board APIs. Add tokens freely; a wrong
 # token just logs an error and is skipped.
-GREENHOUSE = {"MongoDB": "mongodb", "Databricks": "databricks", "Stripe": "stripe",
+GREENHOUSE = {"Razorpay": "razorpaysoftwareprivatelimited", "MongoDB": "mongodb",
+              "Databricks": "databricks", "Stripe": "stripe",
               "Cloudflare": "cloudflare", "Elastic": "elastic"}
 LEVER = {"CRED": "cred", "Meesho": "meesho"}
 
@@ -178,14 +181,13 @@ def atlassian():
     return out
 
 
-def microsoft():
-    base = "https://apply.careers.microsoft.com"
+def eightfold(company, base, domain, prefix, query="software engineer"):
+    """Eightfold career sites (Microsoft, Netflix)."""
     out, start = [], 0
     while start < 1000:
         r = get(base + "/api/pcsx/search", params={
-            "domain": "microsoft.com", "query": "software engineer",
-            "location": "India", "start": start, "sort_by": "distance",
-            "filter_include_remote": 1,
+            "domain": domain, "query": query, "location": "India",
+            "start": start, "sort_by": "distance", "filter_include_remote": 1,
         }).json()
         pos = (r.get("data") or {}).get("positions", [])
         if not pos:
@@ -195,12 +197,12 @@ def microsoft():
 
             def detail(pid=pid):
                 d = get(base + "/api/pcsx/position_details", params={
-                    "position_id": pid, "domain": "microsoft.com", "hl": "en",
+                    "position_id": pid, "domain": domain, "hl": "en",
                 }).json()
                 return clean((d.get("data") or {}).get("jobDescription"))
 
             out.append(dict(
-                id=f"msft-{pid}", company="Microsoft", title=p.get("name", ""),
+                id=f"{prefix}-{pid}", company=company, title=p.get("name", ""),
                 location="; ".join(p.get("locations") or []),
                 url=base + (p.get("positionUrl") or f"/careers/job/{pid}"),
                 posted=to_date(p.get("postedTs")), desc="", detail_fn=detail,
@@ -208,6 +210,14 @@ def microsoft():
         start += len(pos)
         time.sleep(1)
     return out
+
+
+def microsoft():
+    return eightfold("Microsoft", "https://apply.careers.microsoft.com", "microsoft.com", "msft")
+
+
+def netflix():
+    return eightfold("Netflix", "https://explore.jobs.netflix.net", "netflix.com", "nflx")
 
 
 def phenom(company, host, path, locale, country, keywords=""):
@@ -232,12 +242,20 @@ def phenom(company, host, path, locale, country, keywords=""):
             jid = j.get("jobId") or j.get("reqId")
             loc = j.get("location") or ", ".join(
                 x for x in (j.get("city"), j.get("state"), j.get("country")) if x)
+            job_url = f"https://{host}/{path}/job/{jid}"
+
+            def detail(job_url=job_url):
+                page = get(job_url, headers={"Accept": "text/html"}).text
+                blobs = re.findall(r'"description"\s*:\s*"((?:[^"\\]|\\.)*)"', page)
+                if not blobs:
+                    return ""
+                return clean(json.loads('"' + max(blobs, key=len) + '"'))
+
             out.append(dict(
                 id=f"{company.lower().replace(' ', '')}-{jid}", company=company,
-                title=j.get("title", ""), location=loc,
-                url=f"https://{host}/{path}/job/{jid}",
+                title=j.get("title", ""), location=loc, url=job_url,
                 posted=to_date(j.get("postedDate")),
-                desc=clean(j.get("descriptionTeaser")),
+                desc="", teaser=clean(j.get("descriptionTeaser")), detail_fn=detail,
             ))
         frm += len(jobs)
         if not jobs or frm >= rs.get("totalHits", 0):
@@ -282,13 +300,14 @@ def lever(company, slug):
     ) for j in r]
 
 
-# NOT included yet: Google and Apple. Their career sites have no stable
+# NOT included yet: Google, Apple and Bloomberg. Their career sites have no stable
 # public JSON feed (Google embeds data in a JS-rendered page, Apple needs a
 # CSRF-token handshake). Best added once the sites below are confirmed.
 SITES = [
     ("Amazon", amazon),
     ("Atlassian", atlassian),
     ("Microsoft", microsoft),
+    ("Netflix", netflix),
     ("Blue Yonder", blueyonder),
     ("Cisco", cisco),
 ] + [(c, lambda c=c, t=t: greenhouse(c, t)) for c, t in GREENHOUSE.items()] \
@@ -297,7 +316,7 @@ SITES = [
 # ----------------------------------------------------------------------------
 # Filtering
 # ----------------------------------------------------------------------------
-YEARS_RE = re.compile(r"(\d{1,2})\s*(?:\+|plus)?\s*(?:(?:-|–|to)\s*\d{1,2}\s*)?\+?\s*years?", re.I)
+YEARS_RE = re.compile(r"(\d{1,2})\s*(?:\+|plus)?\s*(?:(?:-|–|to)\s*\d{1,2}\s*)?\+?\s*(?:years?|yrs?)\b", re.I)
 
 
 def years_required(text):
@@ -310,32 +329,54 @@ def years_required(text):
     return max(vals) if vals else None
 
 
+def years_in_title(title):
+    """Titles like 'Software Engineer | 4-8 years' or '9+ yrs' state the level."""
+    m = YEARS_RE.search(title or "")
+    return int(m.group(1)) if m else None
+
+
+def posted_date(text):
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    for fmt in ("%Y-%m-%d", "%B %d, %Y"):
+        try:
+            return datetime.strptime(t[:10] if fmt == "%Y-%m-%d" else t, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
 def evaluate(j):
-    """Return an enriched row dict if the job passes all filters, else None."""
+    """Return (row, None) if the job passes all filters, else (None, reason)."""
     title = j["title"] or ""
     if not TITLE_INCLUDE.search(title) or TITLE_EXCLUDE.search(title):
-        return None
+        return None, "title"
     if not LOCATION_OK.search(j["location"] or ""):
-        return None
+        return None, "location"
+    pd = posted_date(j.get("posted"))
+    if MAX_AGE_DAYS and pd and (date.today() - pd).days > MAX_AGE_DAYS:
+        return None, "old"
+    ty = years_in_title(title)
+    if ty is not None and ty > MAX_YEARS_REQUIRED:
+        return None, "years"
     if j.get("detail_fn") and not j["desc"]:
         try:
             j["desc"] = j["detail_fn"]()
             time.sleep(0.5)
-        except requests.RequestException:
+        except Exception:
             pass
-    text = j["desc"] or ""
+    text = j["desc"] or j.get("teaser", "")
     yrs = years_required(j.get("req_text") or text)
     if yrs is not None and yrs > MAX_YEARS_REQUIRED:
-        return None
+        return None, "years"
     matched = [s for s, rx in SKILL_RX.items() if rx.search(text)]
     if len(text) > FULL_DESC_MIN_CHARS and len(matched) < MIN_SKILL_MATCHES:
-        return None
+        return None, "skills"
     return {
         "ID": j["id"], "Company": j["company"], "Title": title,
         "Location": j["location"], "Skills matched": ", ".join(matched),
         "Score": len(matched), "Years req": "" if yrs is None else yrs,
         "Posted": j["posted"], "Link": j["url"],
-    }
+    }, None
 
 
 def collect(only=None):
@@ -349,13 +390,18 @@ def collect(only=None):
             print(f"[ERROR] {company}: {e}", file=sys.stderr)
             continue
         ok_companies.add(company)
-        kept = 0
+        kept, drops = 0, {}
         for j in raw:
-            row = evaluate(j)
+            row, reason = evaluate(j)
             if row:
                 found[row["ID"]] = row
                 kept += 1
-        print(f"[ok] {company}: fetched {len(raw)}, kept {kept}")
+            else:
+                drops[reason] = drops.get(reason, 0) + 1
+        print(f"[ok] {company}: fetched {len(raw)}, kept {kept}, dropped {drops}")
+        if raw and kept == 0:  # help debugging: show what a typical job looks like
+            r0 = raw[0]
+            print(f"     sample: {r0['title']!r} | {r0['location']!r}")
     return found, ok_companies
 
 
