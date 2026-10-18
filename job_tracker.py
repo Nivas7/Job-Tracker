@@ -80,6 +80,8 @@ GREENHOUSE = {"Razorpay": "razorpaysoftwareprivatelimited", "MongoDB": "mongodb"
               "Cloudflare": "cloudflare", "Elastic": "elastic"}
 LEVER = {"CRED": "cred", "Meesho": "meesho"}
 
+DEBUG_DROPPED = os.environ.get("DEBUG_DROPPED") == "1"  # or use --show-dropped
+
 HEADERS = ["ID", "Company", "Title", "Location", "Skills matched", "Score",
            "Years req", "Posted", "First seen", "Link", "Status", "Notes"]
 
@@ -307,7 +309,6 @@ SITES = [
     ("Amazon", amazon),
     ("Atlassian", atlassian),
     ("Microsoft", microsoft),
-    ("Netflix", netflix),
     ("Blue Yonder", blueyonder),
     ("Cisco", cisco),
 ] + [(c, lambda c=c, t=t: greenhouse(c, t)) for c, t in GREENHOUSE.items()] \
@@ -319,14 +320,20 @@ SITES = [
 YEARS_RE = re.compile(r"(\d{1,2})\s*(?:\+|plus)?\s*(?:(?:-|–|to)\s*\d{1,2}\s*)?\+?\s*(?:years?|yrs?)\b", re.I)
 
 
-def years_required(text):
-    """Largest 'N years ... experience' requirement mentioned (range -> its low end)."""
-    vals = []
+def years_detail(text):
+    """Largest 'N years ... experience' requirement (range -> low end) + the phrase."""
+    best, snippet = None, ""
     for m in YEARS_RE.finditer(text or ""):
-        window = text[max(0, m.start() - 40): m.end() + 80].lower()
-        if "experience" in window or "exp." in window:
-            vals.append(int(m.group(1)))
-    return max(vals) if vals else None
+        window = text[max(0, m.start() - 40): m.end() + 80]
+        if "experience" in window.lower() or "exp." in window.lower():
+            n = int(m.group(1))
+            if best is None or n > best:
+                best, snippet = n, re.sub(r"\s+", " ", window).strip()
+    return best, snippet
+
+
+def years_required(text):
+    return years_detail(text)[0]
 
 
 def years_in_title(title):
@@ -348,15 +355,19 @@ def posted_date(text):
 def evaluate(j):
     """Return (row, None) if the job passes all filters, else (None, reason)."""
     title = j["title"] or ""
+    j["why"] = ""
     if not TITLE_INCLUDE.search(title) or TITLE_EXCLUDE.search(title):
+        j["why"] = "excluded by title filter"
         return None, "title"
     if not LOCATION_OK.search(j["location"] or ""):
         return None, "location"
     pd = posted_date(j.get("posted"))
     if MAX_AGE_DAYS and pd and (date.today() - pd).days > MAX_AGE_DAYS:
+        j["why"] = f"posted {pd}"
         return None, "old"
     ty = years_in_title(title)
     if ty is not None and ty > MAX_YEARS_REQUIRED:
+        j["why"] = "title says " + title
         return None, "years"
     if j.get("detail_fn") and not j["desc"]:
         try:
@@ -365,11 +376,13 @@ def evaluate(j):
         except Exception:
             pass
     text = j["desc"] or j.get("teaser", "")
-    yrs = years_required(j.get("req_text") or text)
+    yrs, snip = years_detail(j.get("req_text") or text)
     if yrs is not None and yrs > MAX_YEARS_REQUIRED:
+        j["why"] = snip
         return None, "years"
     matched = [s for s, rx in SKILL_RX.items() if rx.search(text)]
     if len(text) > FULL_DESC_MIN_CHARS and len(matched) < MIN_SKILL_MATCHES:
+        j["why"] = "no resume skills in description"
         return None, "skills"
     return {
         "ID": j["id"], "Company": j["company"], "Title": title,
@@ -377,6 +390,15 @@ def evaluate(j):
         "Score": len(matched), "Years req": "" if yrs is None else yrs,
         "Posted": j["posted"], "Link": j["url"],
     }, None
+
+
+def worth_showing(j, reason):
+    """Debug view: skip the noise of obviously non-engineering titles."""
+    if reason in ("years", "skills", "old"):
+        return True
+    return bool(reason == "title"
+                and re.search(r"engineer|developer|\bsde\b", j["title"], re.I)
+                and LOCATION_OK.search(j["location"] or ""))
 
 
 def collect(only=None):
@@ -398,6 +420,8 @@ def collect(only=None):
                 kept += 1
             else:
                 drops[reason] = drops.get(reason, 0) + 1
+                if DEBUG_DROPPED and worth_showing(j, reason):
+                    print(f"     - [{reason}] {j['title'][:80]} | {j['why'][:120]}")
         print(f"[ok] {company}: fetched {len(raw)}, kept {kept}, dropped {drops}")
         if raw and kept == 0:  # help debugging: show what a typical job looks like
             r0 = raw[0]
@@ -454,8 +478,12 @@ def sync_sheet(found, ok_companies):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="print results, no Sheets")
+    ap.add_argument("--show-dropped", action="store_true",
+                    help="list jobs dropped by years/skills/age and engineering titles dropped")
     ap.add_argument("--only", help="comma list of companies, e.g. amazon,atlassian")
     args = ap.parse_args()
+    global DEBUG_DROPPED
+    DEBUG_DROPPED = DEBUG_DROPPED or args.show_dropped
     only = {x.strip().lower().replace(" ", "") for x in args.only.split(",")} if args.only else None
 
     found, ok = collect(only)
