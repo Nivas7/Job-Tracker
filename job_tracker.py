@@ -19,7 +19,7 @@ import os
 import re
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
@@ -27,27 +27,32 @@ import requests
 # FILTER CONFIG - edit these to tune what you see
 # ----------------------------------------------------------------------------
 TITLE_INCLUDE = re.compile(
-    r"software (development )?engineer|\bsde\b|developer|full[- ]?stack|"
-    r"back[- ]?end|front[- ]?end|member of technical staff|\bmts\b|"
-    r"application engineer",
+    r"engineer|\bsde\b|developer|programmer|full[- ]?stack|back[- ]?end|"
+    r"front[- ]?end|member of technical staff|\bmts\b",
     re.I,
 )
 TITLE_EXCLUDE = re.compile(
     r"senior|\bsr\b|staff|principal|\blead(er|ership)?\b|manager|director|architect|"
     r"head of|distinguished|\bintern\b|internship|\bsdet\b|\bqa\b|quality|"
-    r"\b(engineer|developer|sde)\s*(iii|iv|v|3|4|5)\b",
+    r"\b(engineer|developer|sde)\s*(iii|iv|v|3|4|5)\b|"
+    # engineer-titled roles that are not software development:
+    r"sales|solutions? (engineer|architect)|support engineer|customer engineer|"
+    r"field engineer|pre-?sales|technical account|consultant|analyst|hardware|"
+    r"mechanical|electrical|civil|validation|verification|manufactur|recruit",
     re.I,
 )
 # Max "years of experience" a posting may ask for (0-1, 1-2 => 2).
 MAX_YEARS_REQUIRED = 2
 # Ignore postings older than this many days (set to 0 to disable).
-MAX_AGE_DAYS = 60
+MAX_AGE_DAYS = 90
 # Location must match one of these (India only).
 LOCATION_OK = re.compile(
     r"india|bengaluru|bangalore|chennai|hyderabad|pune|mumbai|gurgaon|gurugram|"
     r"noida|delhi|kolkata|coimbatore|kochi|ahmedabad|trivandrum|thiruvananthapuram",
     re.I,
 )
+# Workday shows '3 Locations' instead of names; resolved from the job page.
+MULTI_LOC = re.compile(r"^\s*\d+\s+locations?\s*$", re.I)
 # Skills from your resume. Matched against the job description.
 SKILL_PATTERNS = {
     "Java": r"\bjava\b(?!\s*script)",
@@ -75,10 +80,48 @@ FULL_DESC_MIN_CHARS = 400
 
 # More companies with public job-board APIs. Add tokens freely; a wrong
 # token just logs an error and is skipped.
-GREENHOUSE = {"Razorpay": "razorpaysoftwareprivatelimited", "MongoDB": "mongodb",
-              "Databricks": "databricks", "Stripe": "stripe",
-              "Cloudflare": "cloudflare", "Elastic": "elastic"}
-LEVER = {"CRED": "cred", "Meesho": "meesho"}
+# Public job-board names. A wrong name just logs "[skip] ... not found".
+GREENHOUSE = {
+    "Anthropic": "anthropic", "Razorpay": "razorpaysoftwareprivatelimited",
+    "Stripe": "stripe", "Databricks": "databricks", "Cloudflare": "cloudflare",
+    "MongoDB": "mongodb", "Elastic": "elastic", "Twilio": "twilio", "Okta": "okta",
+    "Datadog": "datadog", "Coinbase": "coinbase", "Pinterest": "pinterest",
+    "Reddit": "reddit", "Airbnb": "airbnb", "Lyft": "lyft", "Dropbox": "dropbox",
+    "GitLab": "gitlab", "Asana": "asana", "Figma": "figma", "Samsara": "samsara",
+    "Rubrik": "rubrik", "ThoughtSpot": "thoughtspot", "Postman": "postman",
+    "BrowserStack": "browserstack", "Chargebee": "chargebee",
+    "Innovaccer": "innovaccer", "Groww": "groww", "Druva": "druva",
+    "Zscaler": "zscaler", "PagerDuty": "pagerduty", "HubSpot": "hubspot",
+    "Mixpanel": "mixpanel", "Roblox": "roblox", "Unity": "unity3d",
+    "PhonePe": "phonepe", "Juspay": "juspay", "Sprinklr": "sprinklr",
+    "Cohesity": "cohesity", "Netskope": "netskope", "Vimeo": "vimeo",
+}
+LEVER = {
+    "CRED": "cred", "Meesho": "meesho", "Palantir": "palantir", "Spotify": "spotify",
+    "Paytm": "paytm", "Gupshup": "gupshup", "Whatfix": "whatfix", "Zepto": "zepto",
+}
+ASHBY = {
+    "OpenAI": "openai", "Notion": "notion", "Ramp": "ramp", "Deel": "deel",
+    "Retool": "retool", "Vercel": "vercel", "Supabase": "supabase",
+    "Confluent": "confluent", "Linear": "linear",
+}
+SMARTRECRUITERS = {"Visa": "Visa", "ServiceNow": "ServiceNow"}
+# (label, host, tenant, site) for Workday career sites (many big companies).
+WORKDAY = [
+    ("Adobe", "adobe.wd5.myworkdayjobs.com", "adobe", "external_experienced"),
+    ("Salesforce", "salesforce.wd12.myworkdayjobs.com", "salesforce", "External_Career_Site"),
+    ("NVIDIA", "nvidia.wd5.myworkdayjobs.com", "nvidia", "NVIDIAExternalCareerSite"),
+    ("Intel", "intel.wd1.myworkdayjobs.com", "intel", "External"),
+    ("Walmart Global Tech", "walmart.wd5.myworkdayjobs.com", "walmart", "WalmartExternal"),
+    ("Dell", "dell.wd1.myworkdayjobs.com", "dell", "External"),
+    ("Qualcomm", "qualcomm.wd12.myworkdayjobs.com", "qualcomm", "External"),
+    ("Mastercard", "mastercard.wd1.myworkdayjobs.com", "mastercard", "CorporateCareers"),
+    ("PayPal", "paypal.wd1.myworkdayjobs.com", "paypal", "jobs"),
+    ("Broadcom", "broadcom.wd1.myworkdayjobs.com", "broadcom", "External_Career"),
+    ("Capital One", "capitalone.wd12.myworkdayjobs.com", "capitalone", "Capital_One"),
+    ("Workday", "workday.wd5.myworkdayjobs.com", "workday", "Workday"),
+    ("Autodesk", "autodesk.wd1.myworkdayjobs.com", "autodesk", "Ext"),
+]
 
 DEBUG_DROPPED = os.environ.get("DEBUG_DROPPED") == "1"  # or use --show-dropped
 
@@ -302,7 +345,102 @@ def lever(company, slug):
     ) for j in r]
 
 
-# NOT included yet: Google, Apple and Bloomberg. Their career sites have no stable
+def ashby(company, name):
+    r = get(f"https://api.ashbyhq.com/posting-api/job-board/{name}").json()
+    out = []
+    for j in r.get("jobs", []):
+        locs = [j.get("location") or ""] + [
+            (x.get("location") if isinstance(x, dict) else str(x))
+            for x in (j.get("secondaryLocations") or [])]
+        out.append(dict(
+            id=f"ashby-{name}-{j.get('id')}", company=company, title=j.get("title", ""),
+            location="; ".join(x for x in locs if x),
+            url=j.get("jobUrl") or j.get("applyUrl", ""),
+            posted=to_date(j.get("publishedAt") or j.get("publishedDate")),
+            desc=clean(j.get("descriptionPlain") or j.get("descriptionHtml")),
+        ))
+    return out
+
+
+def smartrecruiters(company, cid):
+    out, offset = [], 0
+    while offset < 1000:
+        r = get(f"https://api.smartrecruiters.com/v1/companies/{cid}/postings",
+                params={"limit": 100, "offset": offset, "country": "in", "q": "engineer"}).json()
+        items = r.get("content", [])
+        for p in items:
+            loc = p.get("location") or {}
+            parts = [loc.get("city"), loc.get("region")]
+            if (loc.get("country") or "").lower() == "in":
+                parts.append("India")
+            pid = p.get("id")
+
+            def detail(pid=pid):
+                d = get(f"https://api.smartrecruiters.com/v1/companies/{cid}/postings/{pid}").json()
+                secs = ((d.get("jobAd") or {}).get("sections") or {}).values()
+                return clean(" ".join((x or {}).get("text", "") for x in secs))
+
+            out.append(dict(
+                id=f"sr-{cid}-{pid}", company=company, title=p.get("name", ""),
+                location=", ".join(x for x in parts if x),
+                url=f"https://jobs.smartrecruiters.com/{cid}/{pid}",
+                posted=to_date(p.get("releasedDate")), desc="", detail_fn=detail,
+            ))
+        offset += len(items)
+        if not items or offset >= r.get("totalFound", 0):
+            break
+        time.sleep(1)
+    return out
+
+
+def relative_date(text):
+    t = (text or "").lower()
+    if "today" in t:
+        return date.today().isoformat()
+    if "yesterday" in t:
+        return (date.today() - timedelta(days=1)).isoformat()
+    m = re.search(r"(\d+)\+?\s*days?", t)
+    return (date.today() - timedelta(days=int(m.group(1)))).isoformat() if m else ""
+
+
+def workday(company, host, tenant, site):
+    base = f"https://{host}/wday/cxs/{tenant}/{site}"
+    out = []
+    for text in ("software engineer india", "software engineer"):
+        offset = 0
+        while offset < 400:
+            r = post(base + "/jobs", json={"appliedFacets": {}, "limit": 20,
+                                           "offset": offset, "searchText": text}).json()
+            posts = r.get("jobPostings", [])
+            if not posts:
+                break
+            for p in posts:
+                path = p.get("externalPath", "")
+                job = dict(
+                    id=f"wd-{tenant}-{path.rsplit('/', 1)[-1]}", company=company,
+                    title=p.get("title", ""), location=p.get("locationsText", ""),
+                    url=f"https://{host}/en-US/{site}{path}",
+                    posted=relative_date(p.get("postedOn")), desc="",
+                )
+
+                def detail(job=job, path=path):
+                    d = (get(base + path).json().get("jobPostingInfo") or {})
+                    if MULTI_LOC.search(job["location"] or ""):  # "3 Locations"
+                        locs = [d.get("location") or ""] + list(d.get("additionalLocations") or [])
+                        country = (d.get("country") or {}).get("descriptor", "")
+                        job["location"] = "; ".join(x for x in locs + [country] if x)
+                    return clean(d.get("jobDescription"))
+
+                job["detail_fn"] = detail
+                out.append(job)
+            offset += len(posts)
+            time.sleep(0.5)
+        if out:  # the India-specific search worked; skip the fallback query
+            break
+    return out
+
+
+# NOT included: Meta, Google, Apple, Netflix, Bloomberg. Their career sites have no stable
 # public JSON feed (Google embeds data in a JS-rendered page, Apple needs a
 # CSRF-token handshake). Best added once the sites below are confirmed.
 SITES = [
@@ -312,7 +450,10 @@ SITES = [
     ("Blue Yonder", blueyonder),
     ("Cisco", cisco),
 ] + [(c, lambda c=c, t=t: greenhouse(c, t)) for c, t in GREENHOUSE.items()] \
-  + [(c, lambda c=c, t=t: lever(c, t)) for c, t in LEVER.items()]
+  + [(c, lambda c=c, t=t: lever(c, t)) for c, t in LEVER.items()] \
+  + [(c, lambda c=c, t=t: ashby(c, t)) for c, t in ASHBY.items()] \
+  + [(c, lambda c=c, t=t: smartrecruiters(c, t)) for c, t in SMARTRECRUITERS.items()] \
+  + [(c, lambda c=c, a=a: workday(c, *a)) for c, *a in WORKDAY]
 
 # ----------------------------------------------------------------------------
 # Filtering
@@ -359,7 +500,8 @@ def evaluate(j):
     if not TITLE_INCLUDE.search(title) or TITLE_EXCLUDE.search(title):
         j["why"] = "excluded by title filter"
         return None, "title"
-    if not LOCATION_OK.search(j["location"] or ""):
+    multi = bool(MULTI_LOC.search(j["location"] or ""))
+    if not multi and not LOCATION_OK.search(j["location"] or ""):
         return None, "location"
     pd = posted_date(j.get("posted"))
     if MAX_AGE_DAYS and pd and (date.today() - pd).days > MAX_AGE_DAYS:
@@ -375,6 +517,8 @@ def evaluate(j):
             time.sleep(0.5)
         except Exception:
             pass
+    if multi and not LOCATION_OK.search(j["location"] or ""):
+        return None, "location"
     text = j["desc"] or j.get("teaser", "")
     yrs, snip = years_detail(j.get("req_text") or text)
     if yrs is not None and yrs > MAX_YEARS_REQUIRED:
@@ -409,7 +553,11 @@ def collect(only=None):
         try:
             raw = fn()
         except Exception as e:  # one broken site must not stop the rest
-            print(f"[ERROR] {company}: {e}", file=sys.stderr)
+            resp = getattr(e, "response", None)
+            if resp is not None and resp.status_code == 404:
+                print(f"[skip] {company}: board not found (wrong name?)")
+            else:
+                print(f"[ERROR] {company}: {str(e)[:150]}")
             continue
         ok_companies.add(company)
         kept, drops = 0, {}
@@ -423,7 +571,7 @@ def collect(only=None):
                 if DEBUG_DROPPED and worth_showing(j, reason):
                     print(f"     - [{reason}] {j['title'][:80]} | {j['why'][:120]}")
         print(f"[ok] {company}: fetched {len(raw)}, kept {kept}, dropped {drops}")
-        if raw and kept == 0:  # help debugging: show what a typical job looks like
+        if DEBUG_DROPPED and raw and kept == 0:  # help debugging: show what a typical job looks like
             r0 = raw[0]
             print(f"     sample: {r0['title']!r} | {r0['location']!r}")
     return found, ok_companies
