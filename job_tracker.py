@@ -93,7 +93,7 @@ GREENHOUSE = {
     "Innovaccer": "innovaccer", "Groww": "groww", "Druva": "druva",
     "Zscaler": "zscaler", "PagerDuty": "pagerduty", "HubSpot": "hubspot",
     "Mixpanel": "mixpanel", "Roblox": "roblox", "Unity": "unity3d",
-    "PhonePe": "phonepe", "Juspay": "juspay", "Sprinklr": "sprinklr",
+    "Juspay": "juspay", "Sprinklr": "sprinklr",
     "Cohesity": "cohesity", "Netskope": "netskope", "Vimeo": "vimeo",
 }
 LEVER = {
@@ -105,14 +105,13 @@ ASHBY = {
     "Retool": "retool", "Vercel": "vercel", "Supabase": "supabase",
     "Confluent": "confluent", "Linear": "linear",
 }
-SMARTRECRUITERS = {"Visa": "Visa", "ServiceNow": "ServiceNow"}
+SMARTRECRUITERS = {"PhonePe": "PHONEPELIMITED", "Visa": "Visa", "ServiceNow": "ServiceNow"}
 # (label, host, tenant, site) for Workday career sites (many big companies).
 WORKDAY = [
     ("Adobe", "adobe.wd5.myworkdayjobs.com", "adobe", "external_experienced"),
     ("Salesforce", "salesforce.wd12.myworkdayjobs.com", "salesforce", "External_Career_Site"),
     ("NVIDIA", "nvidia.wd5.myworkdayjobs.com", "nvidia", "NVIDIAExternalCareerSite"),
     ("Intel", "intel.wd1.myworkdayjobs.com", "intel", "External"),
-    ("Walmart Global Tech", "walmart.wd5.myworkdayjobs.com", "walmart", "WalmartExternal"),
     ("Dell", "dell.wd1.myworkdayjobs.com", "dell", "External"),
     ("Qualcomm", "qualcomm.wd12.myworkdayjobs.com", "qualcomm", "External"),
     ("Mastercard", "mastercard.wd1.myworkdayjobs.com", "mastercard", "CorporateCareers"),
@@ -140,13 +139,17 @@ S.headers.update({
 
 
 def _request(method, url, **kw):
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             r = S.request(method, url, timeout=30, **kw)
+            if r.status_code == 429 and attempt < 3:  # rate limited: back off
+                ra = r.headers.get("Retry-After", "")
+                time.sleep(min(int(ra) if ra.isdigit() else 20 * (attempt + 1), 90))
+                continue
             r.raise_for_status()
             return r
         except requests.RequestException:
-            if attempt == 2:
+            if attempt >= 3:
                 raise
             time.sleep(2 * (attempt + 1))
 
@@ -416,6 +419,8 @@ def workday(company, host, tenant, site):
                 break
             for p in posts:
                 path = p.get("externalPath", "")
+                if not path:
+                    continue
                 job = dict(
                     id=f"wd-{tenant}-{path.rsplit('/', 1)[-1]}", company=company,
                     title=p.get("title", ""), location=p.get("locationsText", ""),
@@ -477,9 +482,12 @@ def years_required(text):
     return years_detail(text)[0]
 
 
+BRACKET_YEARS_RE = re.compile(r"\(\s*(\d{1,2})\s*(?:-|–|to)\s*\d{1,2}\s*(?:yoe|years?|yrs?)?\s*\)", re.I)
+
+
 def years_in_title(title):
-    """Titles like 'Software Engineer | 4-8 years' or '9+ yrs' state the level."""
-    m = YEARS_RE.search(title or "")
+    """Titles like 'Software Engineer | 4-8 years', '9+ yrs' or '(5-7)' state the level."""
+    m = YEARS_RE.search(title or "") or BRACKET_YEARS_RE.search(title or "")
     return int(m.group(1)) if m else None
 
 
@@ -560,17 +568,20 @@ def collect(only=None):
                 print(f"[ERROR] {company}: {str(e)[:150]}")
             continue
         ok_companies.add(company)
-        kept, drops = 0, {}
+        kept, drops, ids = 0, {}, set()
         for j in raw:
             row, reason = evaluate(j)
             if row:
                 found[row["ID"]] = row
+                ids.add(row["ID"])
                 kept += 1
             else:
                 drops[reason] = drops.get(reason, 0) + 1
                 if DEBUG_DROPPED and worth_showing(j, reason):
                     print(f"     - [{reason}] {j['title'][:80]} | {j['why'][:120]}")
-        print(f"[ok] {company}: fetched {len(raw)}, kept {kept}, dropped {drops}")
+        print(f"[ok] {company}: fetched {len(raw)}, kept {kept} ({len(ids)} unique), dropped {drops}")
+        if len(ids) < kept:
+            print(f"[warn] {company}: {kept - len(ids)} duplicate IDs collapsed into one row")
         if DEBUG_DROPPED and raw and kept == 0:  # help debugging: show what a typical job looks like
             r0 = raw[0]
             print(f"     sample: {r0['title']!r} | {r0['location']!r}")
