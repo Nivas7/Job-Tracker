@@ -1,11 +1,12 @@
 name: Daily job tracker
 on:
   schedule:
-    - cron: "30 2 * * *"   # 02:30 UTC = 08:00 IST
+    - cron: "30 21 * * *"   # 21:30 UTC = 03:00 IST (GitHub may start it late)
   workflow_dispatch: {}     # lets you run it manually from the Actions tab
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
